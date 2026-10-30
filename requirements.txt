@@ -1,3 +1,5 @@
 Pillow
 feedparser
 requests
+beautifulsoup4
+nepali-datetime
