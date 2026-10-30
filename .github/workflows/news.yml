@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Nepali fonts and text rendering libraries
+      - name: Install Nepali fonts and libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -30,6 +30,9 @@ jobs:
             libharfbuzz-dev \
             libfribidi-dev \
             libfreetype6-dev \
+            libjpeg-dev \
+            zlib1g-dev \
+            libpng-dev \
             pkg-config
 
       - name: Build Pillow with RAQM support
@@ -41,9 +44,9 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Check Nepali text support
+      - name: Check Nepali font and RAQM support
         run: |
-          python -c "from PIL import features; print('RAQM support:', features.check('raqm')); assert features.check('raqm')"
+          python -c "from PIL import ImageFont, features; import os; print('RAQM:', features.check('raqm')); assert features.check('raqm'); assert os.path.exists('/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf')"
 
       - name: Generate news cards
         run: python news_card.py
