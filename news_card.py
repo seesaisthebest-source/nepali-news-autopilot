@@ -1,198 +1,432 @@
-def get_article_photo(entry):
-    article_url = entry.get("link", "")
-    candidates = []
 
-    # RSS media fields
-    for field in [
-        "media_content",
-        "media_thumbnail",
-        "enclosures"
-    ]:
-        for item in entry.get(field, []):
-            image_url = (
-                item.get("url")
-                or item.get("href")
-            )
+import os
+import re
+import textwrap
+from datetime import datetime
+from pathlib import Path
 
-            add_candidate(
-                candidates,
-                image_url,
-                article_url
-            )
+import requests
+from PIL import Image, ImageDraw, ImageFont
 
-    # RSS summary, description and content
-    for field in ["summary", "description"]:
-        find_images_in_text(
-            entry.get(field, ""),
-            candidates,
-            article_url
-        )
+# ---------------- SETTINGS ----------------
 
-    for content_item in entry.get("content", []):
-        find_images_in_text(
-            content_item.get("value", ""),
-            candidates,
-            article_url
-        )
+INPUT_FILE = "news_candidates.md"
+OUTPUT_DIR = "news_cards"
 
-    # Publisher page images
-    if article_url:
-        try:
-            response = requests.get(
-                article_url,
-                headers=HEADERS,
-                timeout=20,
-                allow_redirects=True
-            )
+WIDTH = 1080
+HEIGHT = 1350
+MAX_CARDS = 20
 
-            response.raise_for_status()
+BACKGROUND = "#101C2C"
+WHITE = "#FFFFFF"
+YELLOW = "#F5C542"
+RED = "#D92736"
+MUTED = "#B8C5D3"
 
-            soup = BeautifulSoup(
-                response.text,
-                "html.parser"
-            )
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 NepaliNewsCardBot/1.0"
+}
 
-            for meta in soup.find_all("meta"):
-                key = (
-                    meta.get("property")
-                    or meta.get("name")
-                    or ""
-                ).lower()
+Path(OUTPUT_DIR).mkdir(exist_ok=True)
 
-                if key in [
-                    "og:image",
-                    "og:image:secure_url",
-                    "twitter:image",
-                    "twitter:image:src"
-                ]:
-                    add_candidate(
-                        candidates,
-                        meta.get("content"),
-                        response.url
-                    )
 
-            for img in soup.find_all("img"):
-                for attr in [
-                    "src",
-                    "data-src",
-                    "data-original",
-                    "srcset"
-                ]:
-                    value = img.get(attr)
+# ---------------- FONTS ----------------
 
-                    if not value:
-                        continue
+def load_font(size, bold=False):
+    possible_fonts = [
+        "NotoSansDevanagari-Bold.ttf" if bold else "NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
 
-                    if attr == "srcset":
-                        parts = value.split(",")[0].strip().split()
+    for font_path in possible_fonts:
+        if os.path.exists(font_path):
+            return ImageFont.truetype(font_path, size)
 
-                        if not parts:
-                            continue
+    return ImageFont.load_default()
 
-                        value = parts[0]
 
-                    add_candidate(
-                        candidates,
-                        value,
-                        response.url
-                    )
+# ---------------- NEWS PARSER ----------------
 
-        except requests.RequestException as error:
-            print("Article page error:", error)
+def read_news():
+    path = Path(INPUT_FILE)
 
-    # Remove duplicate candidates
-    candidates = list(dict.fromkeys(candidates))
+    if not path.exists():
+        print("ERROR: news_candidates.md file not found.")
+        return []
 
-    print("Photo candidates found:", len(candidates))
+    content = path.read_text(encoding="utf-8")
+    articles = []
 
-    # Try to download each candidate
-    for url in candidates:
+    # Read markdown headings as news headlines.
+    lines = content.splitlines()
+
+    current = None
+
+    for line in lines:
+        line = line.strip()
+
+        if not line:
+            continue
+
+        if line.startswith("#"):
+            headline = re.sub(r"^#+\s*", "", line).strip()
+
+            if headline and headline.lower() not in [
+                "nepali + world news candidates",
+                "nepali world news candidates",
+            ]:
+                if current:
+                    articles.append(current)
+
+                current = {
+                    "title": headline,
+                    "source": "समाचार स्रोत",
+                    "link": "",
+                }
+
+        elif current:
+            url_match = re.search(r"https?://\S+", line)
+
+            if url_match and not current["link"]:
+                current["link"] = url_match.group(0).rstrip(")>,")
+            
+            if line.lower().startswith("source:"):
+                current["source"] = line.split(":", 1)[1].strip()
+
+    if current:
+        articles.append(current)
+
+    # Alternative: read bullet-style news if no headings exist.
+    if not articles:
+        for line in lines:
+            line = re.sub(r"^\s*[-*•]\s*", "", line).strip()
+
+            if len(line) > 25 and not line.startswith("http"):
+                articles.append({
+                    "title": line,
+                    "source": "समाचार स्रोत",
+                    "link": "",
+                })
+
+    # Remove duplicate headlines.
+    unique = []
+    seen = set()
+
+    for article in articles:
+        title = article["title"].strip()
+
+        if title and title not in seen:
+            seen.add(title)
+            article["title"] = title
+            unique.append(article)
+
+    return unique[:MAX_CARDS]
+
+
+# ---------------- PHOTO ----------------
+
+def get_article_photo(article):
+    url = article.get("link", "")
+
+    if url:
         try:
             response = requests.get(
                 url,
                 headers=HEADERS,
-                timeout=20,
-                allow_redirects=True
+                timeout=15
             )
-
             response.raise_for_status()
 
-            # Do not rely only on Content-Type.
-            # Some publishers return incorrect headers.
-            photo = Image.open(
-                BytesIO(response.content)
-            )
+            from bs4 import BeautifulSoup
 
-            photo.load()
+            soup = BeautifulSoup(response.text, "html.parser")
 
-            photo = photo.convert("RGB")
+            image_url = None
 
-            if photo.width < 2 or photo.height < 2:
-                continue
+            for tag in soup.find_all("meta"):
+                key = (
+                    tag.get("property")
+                    or tag.get("name")
+                    or ""
+                ).lower()
 
-            print("Usable photo found:", url)
+                if key in ["og:image", "twitter:image"]:
+                    image_url = tag.get("content")
+                    if image_url:
+                        break
 
-            return photo
+            if image_url:
+                photo_response = requests.get(
+                    image_url,
+                    headers=HEADERS,
+                    timeout=15
+                )
+                photo_response.raise_for_status()
+
+                from io import BytesIO
+
+                photo = Image.open(
+                    BytesIO(photo_response.content)
+                ).convert("RGB")
+
+                return photo
 
         except Exception as error:
-            print("Photo skipped:", str(error)[:250])
+            print("Photo unavailable:", str(error)[:150])
 
-    # Safe fallback: make a neutral placeholder.
-    # This avoids failing the entire workflow when
-    # publisher photos cannot be downloaded.
-    print("No real photo available. Using placeholder.")
-
+    # Placeholder image
     placeholder = Image.new(
         "RGB",
-        (1080, 720),
+        (WIDTH, 650),
         "#263746"
     )
 
     draw = ImageDraw.Draw(placeholder)
 
-    # Simple decorative news-image placeholder
     draw.rectangle(
-        (100, 150, 980, 570),
+        (100, 100, 980, 550),
         outline="#526879",
         width=8
     )
 
+    draw.ellipse(
+        (750, 180, 850, 280),
+        fill="#526879"
+    )
+
     draw.line(
-        (160, 500, 420, 250, 600, 420, 760, 300, 920, 500),
+        (160, 480, 400, 260, 600, 420, 760, 300, 920, 480),
         fill="#526879",
         width=12
     )
 
-    draw.ellipse(
-        (760, 200, 850, 290),
-        fill="#526879"
+    font = load_font(42, True)
+
+    draw.text(
+        (350, 570),
+        "तस्बिर उपलब्ध छैन",
+        font=font,
+        fill=WHITE
     )
 
-    try:
-        font = load_font(48, True)
+    return placeholder
 
-        text = "तस्बिर उपलब्ध छैन"
+
+# ---------------- IMAGE FIT ----------------
+
+def crop_photo(photo, target_width, target_height):
+    photo = photo.convert("RGB")
+
+    ratio = max(
+        target_width / photo.width,
+        target_height / photo.height
+    )
+
+    new_size = (
+        int(photo.width * ratio),
+        int(photo.height * ratio)
+    )
+
+    photo = photo.resize(
+        new_size,
+        Image.Resampling.LANCZOS
+    )
+
+    left = (photo.width - target_width) // 2
+    top = (photo.height - target_height) // 2
+
+    return photo.crop((
+        left,
+        top,
+        left + target_width,
+        top + target_height
+    ))
+
+
+# ---------------- TEXT WRAPPING ----------------
+
+def wrap_text(draw, text, font, max_width):
+    words = text.split()
+    lines = []
+    current = ""
+
+    for word in words:
+        test = current + " " + word if current else word
 
         box = draw.textbbox(
             (0, 0),
-            text,
-            font=font,
-            direction="ltr",
-            language="ne"
+            test,
+            font=font
         )
 
-        text_width = box[2] - box[0]
+        if box[2] - box[0] <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
 
+    if current:
+        lines.append(current)
+
+    return lines
+
+
+# ---------------- CREATE NEWS CARD ----------------
+
+def create_news_card(article, index):
+    canvas = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        BACKGROUND
+    )
+
+    draw = ImageDraw.Draw(canvas)
+
+    # Top breaking-news strip
+    draw.rectangle(
+        (0, 0, WIDTH, 105),
+        fill=RED
+    )
+
+    brand_font = load_font(46, True)
+
+    draw.text(
+        (45, 22),
+        "नेपाली समाचार",
+        font=brand_font,
+        fill=WHITE
+    )
+
+    breaking_font = load_font(30, True)
+
+    draw.text(
+        (790, 35),
+        "NEWS UPDATE",
+        font=breaking_font,
+        fill=WHITE
+    )
+
+    # Main photo
+    photo = get_article_photo(article)
+
+    photo = crop_photo(
+        photo,
+        WIDTH,
+        650
+    )
+
+    canvas.paste(photo, (0, 105))
+
+    # Headline area
+    draw.rectangle(
+        (0, 755, WIDTH, 1240),
+        fill=BACKGROUND
+    )
+
+    draw.rectangle(
+        (45, 790, 58, 900),
+        fill=YELLOW
+    )
+
+    headline = article.get(
+        "title",
+        "आजका मुख्य समाचार"
+    )
+
+    headline_font = load_font(58, True)
+
+    lines = wrap_text(
+        draw,
+        headline,
+        headline_font,
+        940
+    )
+
+    y = 800
+
+    for line in lines[:5]:
         draw.text(
-            ((1080 - text_width) // 2, 590),
-            text,
-            font=font,
-            fill="#FFFFFF",
-            direction="ltr",
-            language="ne"
+            (90, y),
+            line,
+            font=headline_font,
+            fill=WHITE
         )
+        y += 88
 
-    except Exception as error:
-        print("Placeholder text error:", error)
+    # Footer
+    draw.rectangle(
+        (0, 1240, WIDTH, HEIGHT),
+        fill="#07111E"
+    )
 
-    return placeholder
+    source_font = load_font(30, True)
+    date_font = load_font(26)
+
+    source = article.get("source", "समाचार स्रोत")
+
+    draw.text(
+        (45, 1270),
+        "स्रोत: " + source[:35],
+        font=source_font,
+        fill=MUTED
+    )
+
+    date_text = datetime.now().strftime("%Y-%m-%d")
+
+    draw.text(
+        (800, 1280),
+        date_text,
+        font=date_font,
+        fill=YELLOW
+    )
+
+    output_path = os.path.join(
+        OUTPUT_DIR,
+        f"news_card_{index:02d}.png"
+    )
+
+    canvas.save(
+        output_path,
+        "PNG",
+        optimize=True
+    )
+
+    print("Saved:", output_path)
+
+
+# ---------------- MAIN ----------------
+
+def main():
+    print("Starting Nepali News Card Generator...")
+
+    articles = read_news()
+
+    if not articles:
+        print("No news articles found in news_candidates.md")
+        return
+
+    print("News articles found:", len(articles))
+
+    success = 0
+
+    for index, article in enumerate(articles, start=1):
+        try:
+            create_news_card(article, index)
+            success += 1
+
+        except Exception as error:
+            print(
+                f"Card {index} failed:",
+                str(error)
+            )
+
+    print("================================")
+    print("News cards created:", success)
+    print("Output folder:", OUTPUT_DIR)
+    print("================================")
+
+
+if __name__ == "__main__":
+    main()
