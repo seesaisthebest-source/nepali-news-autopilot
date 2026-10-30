@@ -1,4 +1,3 @@
-
 def get_article_photo(entry):
     article_url = entry.get("link", "")
     candidates = []
