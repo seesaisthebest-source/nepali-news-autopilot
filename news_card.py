@@ -6,6 +6,8 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 from io import BytesIO
 import os
+import re
+import html
 
 WIDTH, HEIGHT = 1080, 1350
 OUTPUT_DIR = "news_cards"
@@ -19,7 +21,7 @@ FONT_REGULAR = "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; NepaliNewsCard/3.0)"
+    "User-Agent": "Mozilla/5.0 (compatible; NepaliNewsCard/4.0)"
 }
 
 FEEDS = [
@@ -109,8 +111,6 @@ def wrap_text(text, font, draw, max_width):
 def is_google_placeholder(url):
     host = urlparse(url).netloc.lower()
 
-    # Google News article pages are not image files.
-    # googleusercontent.com is deliberately allowed.
     blocked = [
         "news.google.com",
         "google.com"
@@ -122,11 +122,99 @@ def is_google_placeholder(url):
     )
 
 
+def add_candidate(candidates, url, base_url=""):
+    if not url:
+        return
+
+    url = html.unescape(str(url)).strip()
+
+    if url.startswith("//"):
+        url = "https:" + url
+
+    if base_url:
+        url = urljoin(base_url, url)
+
+    if url.startswith("http://") or url.startswith("https://"):
+        if not is_google_placeholder(url):
+            candidates.append(url)
+
+
+def find_images_in_text(text, candidates, base_url=""):
+    if not text:
+        return
+
+    # Find normal image URLs.
+    patterns = [
+        r'https?://[^"\'>\s]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"\'>\s]*)?',
+        r'https?://[^"\'>\s]+(?:googleusercontent\.com|images)[^"\'>\s]*'
+    ]
+
+    for pattern in patterns:
+        for match in re.findall(pattern, text, re.IGNORECASE):
+            add_candidate(candidates, match, base_url)
+
+    # Find image URLs inside HTML summary content.
+    try:
+        soup = BeautifulSoup(text, "html.parser")
+
+        for img in soup.find_all("img"):
+            for attr in ["src", "data-src", "srcset"]:
+                value = img.get(attr)
+
+                if not value:
+                    continue
+
+                if attr == "srcset":
+                    value = value.split(",")[0].strip().split()[0]
+
+                add_candidate(
+                    candidates,
+                    value,
+                    base_url
+                )
+
+    except Exception:
+        pass
+
+
 def get_article_photo(entry):
     article_url = entry.get("link", "")
     candidates = []
 
-    # First try the publisher article page.
+    # First try RSS media fields.
+    for field in [
+        "media_content",
+        "media_thumbnail",
+        "enclosures"
+    ]:
+        for item in entry.get(field, []):
+            image_url = (
+                item.get("url")
+                or item.get("href")
+            )
+
+            add_candidate(
+                candidates,
+                image_url,
+                article_url
+            )
+
+    # Search RSS summary and content for embedded images.
+    for field in ["summary", "description"]:
+        find_images_in_text(
+            entry.get(field, ""),
+            candidates,
+            article_url
+        )
+
+    for content_item in entry.get("content", []):
+        find_images_in_text(
+            content_item.get("value", ""),
+            candidates,
+            article_url
+        )
+
+    # Then inspect the publisher article page.
     if article_url:
         try:
             response = requests.get(
@@ -143,43 +231,58 @@ def get_article_photo(entry):
                 "html.parser"
             )
 
-            for attrs in [
+            meta_tags = [
                 {"property": "og:image"},
                 {"name": "twitter:image"},
-                {"property": "og:image:secure_url"}
-            ]:
+                {"property": "og:image:secure_url"},
+                {"name": "twitter:image:src"}
+            ]
+
+            for attrs in meta_tags:
                 tag = soup.find("meta", attrs=attrs)
 
                 if tag and tag.get("content"):
-                    image_url = urljoin(
-                        response.url,
-                        tag["content"]
+                    add_candidate(
+                        candidates,
+                        tag["content"],
+                        response.url
                     )
-                    candidates.append(image_url)
+
+            # Find images in the article page.
+            for img in soup.find_all("img"):
+                for attr in [
+                    "src",
+                    "data-src",
+                    "data-original",
+                    "srcset"
+                ]:
+                    value = img.get(attr)
+
+                    if not value:
+                        continue
+
+                    if attr == "srcset":
+                        value = (
+                            value.split(",")[0]
+                            .strip()
+                            .split()[0]
+                        )
+
+                    add_candidate(
+                        candidates,
+                        value,
+                        response.url
+                    )
 
         except requests.RequestException as error:
             print("Article page error:", error)
 
-    # RSS image links are fallback candidates.
-    for item in entry.get("media_content", []):
-        if item.get("url"):
-            candidates.append(item["url"])
-
-    for item in entry.get("media_thumbnail", []):
-        if item.get("url"):
-            candidates.append(item["url"])
-
-    for item in entry.get("enclosures", []):
-        if item.get("href"):
-            candidates.append(item["href"])
-
-    # Remove duplicate URLs.
+    # Remove duplicate image URLs.
     candidates = list(dict.fromkeys(candidates))
 
-    for url in candidates:
-        if is_google_placeholder(url):
-            continue
+    print("Photo candidates found:", len(candidates))
 
+    for url in candidates:
         try:
             response = requests.get(
                 url,
@@ -200,7 +303,6 @@ def get_article_photo(entry):
                 BytesIO(response.content)
             ).convert("RGB")
 
-            # Reject very small icons.
             if photo.width < 400 or photo.height < 250:
                 continue
 
@@ -208,6 +310,8 @@ def get_article_photo(entry):
 
             if ratio < 0.65 or ratio > 2.8:
                 continue
+
+            print("Usable photo found:", url)
 
             return photo
 
@@ -253,7 +357,6 @@ def create_card(title, source, photo, number):
         BG
     )
 
-    # News photograph.
     photo_area = crop_cover(
         photo,
         WIDTH,
@@ -360,6 +463,7 @@ def create_card(title, source, photo, number):
     )
 
     filename = f"news_{number:02d}.png"
+
     path = os.path.join(
         OUTPUT_DIR,
         filename
