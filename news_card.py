@@ -1,11 +1,10 @@
-
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, features
 from datetime import datetime
 import feedparser
 import requests
 import nepali_datetime
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from io import BytesIO
 import os
 import re
@@ -22,7 +21,7 @@ FONT_REGULAR = "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; NepaliNewsCard/1.0)"
+    "User-Agent": "Mozilla/5.0 (compatible; NepaliNewsCard/2.0)"
 }
 
 FEEDS = [
@@ -54,77 +53,20 @@ def nepali_date():
 
 def load_font(size, bold=False):
     path = FONT_BOLD if bold else FONT_REGULAR
+
     if not os.path.exists(path):
-        path = FONT_REGULAR
+        raise FileNotFoundError("Nepali font not found: " + path)
+
+    if not features.check("raqm"):
+        raise RuntimeError(
+            "Pillow RAQM support is missing. Check news.yml setup."
+        )
 
     return ImageFont.truetype(
         path,
         size,
         layout_engine=ImageFont.Layout.RAQM
     )
-
-
-def get_photo(entry):
-    candidates = []
-
-    for item in entry.get("media_content", []):
-        if item.get("url"):
-            candidates.append(item["url"])
-
-    for item in entry.get("media_thumbnail", []):
-        if item.get("url"):
-            candidates.append(item["url"])
-
-    for item in entry.get("enclosures", []):
-        if item.get("href"):
-            candidates.append(item["href"])
-
-    article_url = entry.get("link", "")
-
-    if article_url:
-        try:
-            response = requests.get(
-                article_url,
-                headers=HEADERS,
-                timeout=15
-            )
-            soup = BeautifulSoup(response.text, "html.parser")
-
-            for selector in [
-                {"property": "og:image"},
-                {"name": "twitter:image"}
-            ]:
-                tag = soup.find("meta", attrs=selector)
-                if tag and tag.get("content"):
-                    candidates.append(
-                        urljoin(response.url, tag["content"])
-                    )
-        except requests.RequestException:
-            pass
-
-    for url in candidates:
-        try:
-            response = requests.get(
-                url,
-                headers=HEADERS,
-                timeout=15
-            )
-            response.raise_for_status()
-
-            if "image" not in response.headers.get(
-                "Content-Type", ""
-            ):
-                continue
-
-            photo = Image.open(BytesIO(response.content)).convert("RGB")
-
-            if photo.width >= 300 and photo.height >= 200:
-                return photo
-
-        except Exception:
-            continue
-
-    return None
 
 
 def wrap_text(text, font, draw, max_width):
@@ -134,7 +76,14 @@ def wrap_text(text, font, draw, max_width):
 
     for word in words:
         test = (current + " " + word).strip()
-        box = draw.textbbox((0, 0), test, font=font)
+
+        box = draw.textbbox(
+            (0, 0),
+            test,
+            font=font,
+            direction="ltr",
+            language="ne"
+        )
 
         if box[2] - box[0] <= max_width:
             current = test
@@ -149,38 +98,197 @@ def wrap_text(text, font, draw, max_width):
     return lines
 
 
+def is_google_placeholder(url):
+    host = urlparse(url).netloc.lower()
+
+    blocked = [
+        "news.google.com",
+        "google.com",
+        "googleusercontent.com"
+    ]
+
+    return any(host == item or host.endswith("." + item)
+               for item in blocked)
+
+
+def get_article_photo(entry):
+    article_url = entry.get("link", "")
+    candidates = []
+
+    # First try the publisher's actual article page
+    if article_url:
+        try:
+            response = requests.get(
+                article_url,
+                headers=HEADERS,
+                timeout=20,
+                allow_redirects=True
+            )
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            for attrs in [
+                {"property": "og:image"},
+                {"name": "twitter:image"},
+                {"property": "og:image:secure_url"}
+            ]:
+                tag = soup.find("meta", attrs=attrs)
+
+                if tag and tag.get("content"):
+                    image_url = urljoin(
+                        response.url,
+                        tag["content"]
+                    )
+                    candidates.append(image_url)
+
+        except requests.RequestException as error:
+            print("Article page error:", error)
+
+    # RSS images are fallback candidates only
+    for item in entry.get("media_content", []):
+        if item.get("url"):
+            candidates.append(item["url"])
+
+    for item in entry.get("media_thumbnail", []):
+        if item.get("url"):
+            candidates.append(item["url"])
+
+    for item in entry.get("enclosures", []):
+        if item.get("href"):
+            candidates.append(item["href"])
+
+    # Remove duplicates
+    candidates = list(dict.fromkeys(candidates))
+
+    for url in candidates:
+        if is_google_placeholder(url):
+            continue
+
+        try:
+            response = requests.get(
+                url,
+                headers=HEADERS,
+                timeout=20
+            )
+            response.raise_for_status()
+
+            content_type = response.headers.get(
+                "Content-Type", ""
+            ).lower()
+
+            if "image/" not in content_type:
+                continue
+
+            photo = Image.open(
+                BytesIO(response.content)
+            ).convert("RGB")
+
+            # Reject tiny icons and logos
+            if photo.width < 400 or photo.height < 250:
+                continue
+
+            ratio = photo.width / photo.height
+
+            if ratio < 0.65 or ratio > 2.8:
+                continue
+
+            return photo
+
+        except Exception as error:
+            print("Photo skipped:", error)
+
+    return None
+
+
+def crop_cover(photo, width, height):
+    photo = photo.copy()
+
+    scale = max(
+        width / photo.width,
+        height / photo.height
+    )
+
+    new_size = (
+        int(photo.width * scale),
+        int(photo.height * scale)
+    )
+
+    photo = photo.resize(
+        new_size,
+        Image.Resampling.LANCZOS
+    )
+
+    left = (photo.width - width) // 2
+    top = (photo.height - height) // 2
+
+    return photo.crop((
+        left,
+        top,
+        left + width,
+        top + height
+    ))
+
+
 def create_card(title, source, photo, number):
     image = Image.new("RGB", (WIDTH, HEIGHT), BG)
 
-    # Photo area
-    photo = photo.copy()
-    photo.thumbnail((WIDTH, 720))
-
-    photo_canvas = Image.new("RGB", (WIDTH, 720), "#202B36")
-    x = (WIDTH - photo.width) // 2
-    y = (720 - photo.height) // 2
-    photo_canvas.paste(photo, (x, y))
-    image.paste(photo_canvas, (0, 0))
+    # Real news photo
+    photo_area = crop_cover(photo, WIDTH, 720)
+    image.paste(photo_area, (0, 0))
 
     draw = ImageDraw.Draw(image)
 
-    # Breaking news header
-    draw.rectangle((0, 720, WIDTH, 850), fill=RED)
+    # Red news heading bar
+    draw.rectangle(
+        (0, 720, WIDTH, 850),
+        fill=RED
+    )
 
     category_font = load_font(48, True)
+
     draw.text(
         (55, 755),
         "ताजा समाचार",
         font=category_font,
-        fill=WHITE
+        fill=WHITE,
+        direction="ltr",
+        language="ne"
     )
 
-    # Headline
-    headline_font = load_font(54, True)
-    lines = wrap_text(title, headline_font, draw, WIDTH - 120)
+    # Headline with automatic font sizing
+    headline_font = None
+    lines = []
+
+    for size in [54, 50, 46, 42, 38]:
+        test_font = load_font(size, True)
+        test_lines = wrap_text(
+            title,
+            test_font,
+            draw,
+            WIDTH - 120
+        )
+
+        if len(test_lines) <= 4:
+            headline_font = test_font
+            lines = test_lines
+            break
+
+    if headline_font is None:
+        headline_font = load_font(38, True)
+        lines = wrap_text(
+            title,
+            headline_font,
+            draw,
+            WIDTH - 120
+        )[:4]
+
+        if lines:
+            lines[-1] += "..."
 
     y = 900
-    for line in lines[:4]:
+
+    for line in lines:
         draw.text(
             (60, y),
             line,
@@ -189,36 +297,59 @@ def create_card(title, source, photo, number):
             direction="ltr",
             language="ne"
         )
-        y += 70
+        y += 65
 
     # Footer
-    draw.rectangle((0, 1190, WIDTH, HEIGHT), fill="#202B36")
+    draw.rectangle(
+        (0, 1190, WIDTH, HEIGHT),
+        fill="#202B36"
+    )
 
     source_font = load_font(34, True)
     date_font = load_font(30)
 
-    draw.text((60, 1210), source, font=source_font, fill=WHITE)
+    draw.text(
+        (60, 1210),
+        source,
+        font=source_font,
+        fill=WHITE,
+        direction="ltr",
+        language="ne"
+    )
+
     draw.text(
         (60, 1270),
         "मिति: " + nepali_date(),
         font=date_font,
-        fill=GRAY
+        fill=GRAY,
+        direction="ltr",
+        language="ne"
     )
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     filename = f"news_{number:02d}.png"
     path = os.path.join(OUTPUT_DIR, filename)
 
-    image.save(path, quality=95)
+    image.save(path, format="PNG")
+
     print("Created:", path)
 
 
 def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # Remove old cards so previous results are not mixed
+    for filename in os.listdir(OUTPUT_DIR):
+        if filename.endswith(".png"):
+            os.remove(os.path.join(OUTPUT_DIR, filename))
+
     count = 0
     seen = set()
 
     for source, feed_url in FEEDS:
         print("Checking:", source)
+
         feed = feedparser.parse(feed_url)
 
         for entry in feed.entries[:10]:
@@ -229,11 +360,12 @@ def main():
 
             seen.add(title)
 
-            print("Finding photo:", title)
-            photo = get_photo(entry)
+            print("Finding real photo:", title)
+
+            photo = get_article_photo(entry)
 
             if photo is None:
-                print("Skipped: no usable photo")
+                print("Skipped: no verified usable photo")
                 continue
 
             count += 1
