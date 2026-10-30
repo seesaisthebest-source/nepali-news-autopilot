@@ -1,63 +1,56 @@
 from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 import os
-import textwrap
-
-# Nepali News Card Generator
-# Facebook / Instagram Portrait News Card
-# Size: 1080 x 1350
 
 WIDTH = 1080
 HEIGHT = 1350
 
-BG_COLOR = "#101820"
+BG = "#101820"
 RED = "#E63946"
 WHITE = "#FFFFFF"
 GRAY = "#DDE3E8"
-CARD_COLOR = "#202B36"
+CARD = "#202B36"
 
 OUTPUT_DIR = "news_cards"
 
+FONT_REGULAR = "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf"
+FONT_BOLD = "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf"
+
 
 def load_font(size, bold=False):
-    font_paths = [
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
+    path = FONT_BOLD if bold else FONT_REGULAR
 
-    for path in font_paths:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except OSError:
-                pass
+    if not os.path.exists(path):
+        path = FONT_REGULAR
 
-    return ImageFont.load_default()
+    try:
+        return ImageFont.truetype(
+            path,
+            size,
+            layout_engine=ImageFont.Layout.RAQM
+        )
+    except (OSError, AttributeError):
+        return ImageFont.truetype(path, size)
 
 
 def wrap_text(text, font, draw, max_width):
     words = text.split()
     lines = []
-    current_line = ""
+    current = ""
 
     for word in words:
-        test_line = current_line + " " + word
-        test_line = test_line.strip()
+        test = (current + " " + word).strip()
+        box = draw.textbbox((0, 0), test, font=font)
 
-        bbox = draw.textbbox((0, 0), test_line, font=font)
-        line_width = bbox[2] - bbox[0]
-
-        if line_width <= max_width:
-            current_line = test_line
+        if box[2] - box[0] <= max_width:
+            current = test
         else:
-            if current_line:
-                lines.append(current_line)
-            current_line = word
+            if current:
+                lines.append(current)
+            current = word
 
-    if current_line:
-        lines.append(current_line)
+    if current:
+        lines.append(current)
 
     return lines
 
@@ -65,85 +58,82 @@ def wrap_text(text, font, draw, max_width):
 def create_news_card(
     headline,
     category="ताजा समाचार",
-    source="Nepali World News",
+    source="नेपाली समाचार",
     output="news_card.png"
 ):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        BG_COLOR
-    )
-
+    image = Image.new("RGB", (WIDTH, HEIGHT), BG)
     draw = ImageDraw.Draw(image)
 
-    # Header
-    draw.rectangle(
-        (0, 0, WIDTH, 170),
-        fill=RED
-    )
+    # Top red header
+    draw.rectangle((0, 0, WIDTH, 190), fill=RED)
 
-    header_font = load_font(55, bold=True)
+    category_font = load_font(52, bold=True)
 
     draw.text(
-        (55, 45),
+        (65, 55),
         category,
-        font=header_font,
+        font=category_font,
         fill=WHITE
     )
 
-    # Main headline
-    headline_font = load_font(66, bold=True)
+    # Headline
+    headline_font = load_font(68, bold=True)
 
     lines = wrap_text(
         headline,
         headline_font,
         draw,
-        WIDTH - 120
+        WIDTH - 140
     )
 
-    y = 300
+    y = 330
+    line_gap = 112
 
-    for line in lines:
+    for line in lines[:6]:
         draw.text(
-            (60, y),
+            (70, y),
             line,
             font=headline_font,
-            fill=WHITE
+            fill=WHITE,
+            direction="ltr",
+            language="ne"
         )
+        y += line_gap
 
-        y += 105
+    # Decorative divider
+    draw.rounded_rectangle(
+        (70, 1030, WIDTH - 70, 1042),
+        radius=6,
+        fill=RED
+    )
 
     # Footer
     draw.rectangle(
-        (0, 1160, WIDTH, HEIGHT),
-        fill=CARD_COLOR
+        (0, 1120, WIDTH, HEIGHT),
+        fill=CARD
     )
 
-    source_font = load_font(38)
-    date_font = load_font(30)
+    source_font = load_font(38, bold=True)
+    date_font = load_font(28)
 
     draw.text(
-        (60, 1200),
+        (70, 1160),
         source,
         font=source_font,
-        fill=GRAY
+        fill=WHITE
     )
 
     draw.text(
-        (60, 1260),
-        datetime.now().strftime("%Y-%m-%d"),
+        (70, 1240),
+        "प्रकाशित मिति: " + datetime.now().strftime("%Y-%m-%d"),
         font=date_font,
         fill=GRAY
     )
 
-    output_path = os.path.join(
-        OUTPUT_DIR,
-        output
-    )
-
-    image.save(output_path)
+    output_path = os.path.join(OUTPUT_DIR, output)
+    image.save(output_path, quality=95)
 
     print("News card created:", output_path)
 
@@ -151,7 +141,7 @@ def create_news_card(
 if __name__ == "__main__":
     create_news_card(
         headline="नेपाल र विश्वका ताजा समाचार",
-        category="आजको मुख्य समाचार",
-        source="Nepali World News",
+        category="आजका मुख्य समाचार",
+        source="नेपाली विश्व समाचार",
         output="sample_news.png"
     )
