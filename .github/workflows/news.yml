@@ -1,1 +1,37 @@
+name: Nepali News Autopilot
 
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  generate-news-cards:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install requirements
+        run: pip install -r requirements.txt
+
+      - name: Generate news cards
+        run: python news_card.py
+
+      - name: Save generated cards
+        uses: actions/upload-artifact@v4
+        with:
+          name: nepali-news-cards
+          path: |
+            *.png
+            *.jpg
+          if-no-files-found: warn
