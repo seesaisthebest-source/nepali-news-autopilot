@@ -1,5 +1,4 @@
 from PIL import Image, ImageDraw, ImageFont, features
-from datetime import datetime
 import feedparser
 import requests
 import nepali_datetime
@@ -7,7 +6,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 from io import BytesIO
 import os
-import re
 
 WIDTH, HEIGHT = 1080, 1350
 OUTPUT_DIR = "news_cards"
@@ -21,29 +19,37 @@ FONT_REGULAR = "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; NepaliNewsCard/2.0)"
+    "User-Agent": "Mozilla/5.0 (compatible; NepaliNewsCard/3.0)"
 }
 
 FEEDS = [
-    ("नेपाल समाचार",
-     "https://news.google.com/rss/search?q=नेपाल&hl=ne&gl=NP&ceid=NP:ne"),
-    ("विश्व समाचार",
-     "https://news.google.com/rss/search?q=विश्व+समाचार&hl=ne&gl=NP&ceid=NP:ne")
+    (
+        "नेपाल समाचार",
+        "https://news.google.com/rss/search?q=नेपाल&hl=ne&gl=NP&ceid=NP:ne"
+    ),
+    (
+        "विश्व समाचार",
+        "https://news.google.com/rss/search?q=विश्व+समाचार&hl=ne&gl=NP&ceid=NP:ne"
+    )
 ]
 
 
 def nepali_digits(value):
     digits = "०१२३४५६७८९"
-    return str(value).translate(str.maketrans("0123456789", digits))
+    return str(value).translate(
+        str.maketrans("0123456789", digits)
+    )
 
 
 def nepali_date():
     today = nepali_datetime.date.today()
+
     months = [
         "बैशाख", "जेठ", "असार", "साउन",
         "भदौ", "असोज", "कार्तिक", "मंसिर",
         "पुस", "माघ", "फागुन", "चैत"
     ]
+
     return (
         f"{nepali_digits(today.year)} "
         f"{months[today.month - 1]} "
@@ -55,11 +61,13 @@ def load_font(size, bold=False):
     path = FONT_BOLD if bold else FONT_REGULAR
 
     if not os.path.exists(path):
-        raise FileNotFoundError("Nepali font not found: " + path)
+        raise FileNotFoundError(
+            "Nepali font not found: " + path
+        )
 
     if not features.check("raqm"):
         raise RuntimeError(
-            "Pillow RAQM support is missing. Check news.yml setup."
+            "Pillow RAQM support is missing. Check news.yml."
         )
 
     return ImageFont.truetype(
@@ -101,21 +109,24 @@ def wrap_text(text, font, draw, max_width):
 def is_google_placeholder(url):
     host = urlparse(url).netloc.lower()
 
+    # Google News article pages are not image files.
+    # googleusercontent.com is deliberately allowed.
     blocked = [
         "news.google.com",
-        "google.com",
-        "googleusercontent.com"
+        "google.com"
     ]
 
-    return any(host == item or host.endswith("." + item)
-               for item in blocked)
+    return any(
+        host == item or host.endswith("." + item)
+        for item in blocked
+    )
 
 
 def get_article_photo(entry):
     article_url = entry.get("link", "")
     candidates = []
 
-    # First try the publisher's actual article page
+    # First try the publisher article page.
     if article_url:
         try:
             response = requests.get(
@@ -124,9 +135,13 @@ def get_article_photo(entry):
                 timeout=20,
                 allow_redirects=True
             )
+
             response.raise_for_status()
 
-            soup = BeautifulSoup(response.text, "html.parser")
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
+            )
 
             for attrs in [
                 {"property": "og:image"},
@@ -145,7 +160,7 @@ def get_article_photo(entry):
         except requests.RequestException as error:
             print("Article page error:", error)
 
-    # RSS images are fallback candidates only
+    # RSS image links are fallback candidates.
     for item in entry.get("media_content", []):
         if item.get("url"):
             candidates.append(item["url"])
@@ -158,7 +173,7 @@ def get_article_photo(entry):
         if item.get("href"):
             candidates.append(item["href"])
 
-    # Remove duplicates
+    # Remove duplicate URLs.
     candidates = list(dict.fromkeys(candidates))
 
     for url in candidates:
@@ -171,6 +186,7 @@ def get_article_photo(entry):
                 headers=HEADERS,
                 timeout=20
             )
+
             response.raise_for_status()
 
             content_type = response.headers.get(
@@ -184,7 +200,7 @@ def get_article_photo(entry):
                 BytesIO(response.content)
             ).convert("RGB")
 
-            # Reject tiny icons and logos
+            # Reject very small icons.
             if photo.width < 400 or photo.height < 250:
                 continue
 
@@ -231,15 +247,24 @@ def crop_cover(photo, width, height):
 
 
 def create_card(title, source, photo, number):
-    image = Image.new("RGB", (WIDTH, HEIGHT), BG)
+    image = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        BG
+    )
 
-    # Real news photo
-    photo_area = crop_cover(photo, WIDTH, 720)
+    # News photograph.
+    photo_area = crop_cover(
+        photo,
+        WIDTH,
+        720
+    )
+
     image.paste(photo_area, (0, 0))
 
     draw = ImageDraw.Draw(image)
 
-    # Red news heading bar
+    # Red news heading.
     draw.rectangle(
         (0, 720, WIDTH, 850),
         fill=RED
@@ -256,12 +281,13 @@ def create_card(title, source, photo, number):
         language="ne"
     )
 
-    # Headline with automatic font sizing
+    # Automatically adjust headline font size.
     headline_font = None
     lines = []
 
     for size in [54, 50, 46, 42, 38]:
         test_font = load_font(size, True)
+
         test_lines = wrap_text(
             title,
             test_font,
@@ -276,6 +302,7 @@ def create_card(title, source, photo, number):
 
     if headline_font is None:
         headline_font = load_font(38, True)
+
         lines = wrap_text(
             title,
             headline_font,
@@ -297,9 +324,10 @@ def create_card(title, source, photo, number):
             direction="ltr",
             language="ne"
         )
+
         y += 65
 
-    # Footer
+    # Footer.
     draw.rectangle(
         (0, 1190, WIDTH, HEIGHT),
         fill="#202B36"
@@ -326,23 +354,37 @@ def create_card(title, source, photo, number):
         language="ne"
     )
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(
+        OUTPUT_DIR,
+        exist_ok=True
+    )
 
     filename = f"news_{number:02d}.png"
-    path = os.path.join(OUTPUT_DIR, filename)
+    path = os.path.join(
+        OUTPUT_DIR,
+        filename
+    )
 
-    image.save(path, format="PNG")
+    image.save(
+        path,
+        format="PNG"
+    )
 
     print("Created:", path)
 
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(
+        OUTPUT_DIR,
+        exist_ok=True
+    )
 
-    # Remove old cards so previous results are not mixed
+    # Remove previous PNG cards.
     for filename in os.listdir(OUTPUT_DIR):
-        if filename.endswith(".png"):
-            os.remove(os.path.join(OUTPUT_DIR, filename))
+        if filename.lower().endswith(".png"):
+            os.remove(
+                os.path.join(OUTPUT_DIR, filename)
+            )
 
     count = 0
     seen = set()
@@ -360,18 +402,30 @@ def main():
 
             seen.add(title)
 
-            print("Finding real photo:", title)
+            print("Finding photo:", title)
 
             photo = get_article_photo(entry)
 
             if photo is None:
-                print("Skipped: no verified usable photo")
+                print("Skipped: no usable photo")
                 continue
 
             count += 1
-            create_card(title, source, photo, count)
+
+            create_card(
+                title,
+                source,
+                photo,
+                count
+            )
 
     print("Total cards created:", count)
+
+    if count == 0:
+        raise RuntimeError(
+            "No news cards were created. "
+            "No usable photos were found."
+        )
 
 
 if __name__ == "__main__":
