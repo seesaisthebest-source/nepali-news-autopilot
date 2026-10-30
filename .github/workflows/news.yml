@@ -1,3 +1,4 @@
+
 name: Nepali News Autopilot
 
 "on":
@@ -35,21 +36,26 @@ jobs:
             libpng-dev \
             pkg-config
 
-      - name: Build Pillow with RAQM support
+      - name: Install Python libraries
         run: |
           python -m pip install --upgrade pip
           python -m pip install --no-binary=Pillow Pillow
-
-      - name: Install requirements
-        run: |
           pip install -r requirements.txt
 
       - name: Check Nepali font and RAQM support
         run: |
-          python -c "from PIL import ImageFont, features; import os; print('RAQM:', features.check('raqm')); assert features.check('raqm'); assert os.path.exists('/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf')"
+          python -c "from PIL import features; import os; print('RAQM:', features.check('raqm')); assert features.check('raqm'); assert os.path.exists('/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf')"
+
+      - name: Collect news
+        run: python news.py
 
       - name: Generate news cards
         run: python news_card.py
+
+      - name: List generated cards
+        run: |
+          echo "Generated PNG files:"
+          find news_cards -maxdepth 1 -type f -name "*.png" -print
 
       - name: Save generated cards
         uses: actions/upload-artifact@v4
