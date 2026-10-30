@@ -32,6 +32,6 @@ jobs:
         with:
           name: nepali-news-cards
           path: |
-            *.png
-            *.jpg
+  news_cards/*.png
+  news_cards/*.jpg
           if-no-files-found: warn
