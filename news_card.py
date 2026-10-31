@@ -1,6 +1,6 @@
-
 import os
 import re
+import textwrap
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urljoin
@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from nepali_datetime import date as NepaliDate
 
-# ---------------- SETTINGS ----------------
+# ============== SETTINGS ==============
 
 INPUT_FILE = "news_candidates.md"
 OUTPUT_DIR = "news_cards"
@@ -19,11 +19,12 @@ WIDTH = 1080
 HEIGHT = 1350
 MAX_CARDS = 20
 
-BACKGROUND = "#101C2C"
+BG = "#101C2C"
 WHITE = "#FFFFFF"
 YELLOW = "#F5C542"
 RED = "#D92736"
 MUTED = "#B8C5D3"
+PANEL = "#17283D"
 
 HEADERS = {
     "User-Agent": (
@@ -32,7 +33,7 @@ HEADERS = {
     )
 }
 
-Path(OUTPUT_DIR).mkdir(exist_ok=True)
+Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
 NEPALI_MONTHS = [
     "",
@@ -47,66 +48,58 @@ DIGITS = str.maketrans(
 )
 
 
-# ---------------- FONT ----------------
+# ============== FONT ==============
 
 def load_font(size, bold=False):
 
-    fonts = []
+    names = (
+        [
+            "/usr/share/fonts/truetype/noto/"
+            "NotoSansDevanagari-Bold.ttf",
+            "fonts/NotoSansDevanagari-Bold.ttf"
+        ]
+        if bold else
+        [
+            "/usr/share/fonts/truetype/noto/"
+            "NotoSansDevanagari-Regular.ttf",
+            "fonts/NotoSansDevanagari-Regular.ttf"
+        ]
+    )
 
-    if bold:
-        fonts.extend([
-            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansDevanagariUI-Bold.ttf",
-        ])
-    else:
-        fonts.extend([
-            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansDevanagariUI-Regular.ttf",
-        ])
-
-    fonts.extend([
-        "fonts/NotoSansDevanagari-Bold.ttf" if bold
-        else "fonts/NotoSansDevanagari-Regular.ttf"
-    ])
-
-    for font_path in fonts:
-        if os.path.exists(font_path):
+    for path in names:
+        if os.path.exists(path):
             try:
                 return ImageFont.truetype(
-                    font_path,
+                    path,
                     size,
                     layout_engine=ImageFont.Layout.RAQM
                 )
             except Exception:
-                try:
-                    return ImageFont.truetype(font_path, size)
-                except Exception:
-                    pass
+                return ImageFont.truetype(path, size)
 
     raise FileNotFoundError(
-        "Noto Sans Devanagari font not found. "
-        "Check fonts installation in news.yml."
+        "Noto Sans Devanagari font not found."
     )
 
 
-# ---------------- NEPALI DATE ----------------
+# ============== NEPALI DATE ==============
 
 def get_nepali_date():
 
     today = NepaliDate.today()
 
-    month_name = NEPALI_MONTHS[today.month]
+    month = NEPALI_MONTHS[today.month]
 
-    date_text = (
+    value = (
         f"{today.year} साल "
-        f"{month_name} "
+        f"{month} "
         f"{today.day} गते"
     )
 
-    return date_text.translate(DIGITS)
+    return value.translate(DIGITS)
 
 
-# ---------------- NEWS PARSER ----------------
+# ============== NEWS PARSER ==============
 
 def read_news():
 
@@ -121,6 +114,16 @@ def read_news():
     articles = []
     current = None
 
+    ignored = [
+        "nepali + world news candidates",
+        "nepali world news candidates",
+        "nepali + world news report",
+        "recent candidates",
+        "needs manual date check",
+        "summary",
+        "feed errors"
+    ]
+
     for line in content.splitlines():
 
         line = line.strip()
@@ -128,84 +131,95 @@ def read_news():
         if not line:
             continue
 
-        if line.startswith("#"):
+        # Article heading
+        if line.startswith("##"):
 
-            headline = re.sub(
+            title = re.sub(
                 r"^#+\s*",
                 "",
                 line
             ).strip()
 
-            if headline.lower() in [
-                "nepali + world news candidates",
-                "nepali world news candidates"
-            ]:
+            if title.lower() in ignored:
+                current = None
                 continue
 
-            if current:
-                articles.append(current)
+            if title.lower().startswith("checked at"):
+                current = None
+                continue
+
+            if title.lower().startswith("fetched at"):
+                current = None
+                continue
+
+            if title.lower().startswith("freshness"):
+                current = None
+                continue
+
+            if title.lower().startswith("verification"):
+                current = None
+                continue
 
             current = {
-                "title": headline,
-                "source": "समाचार स्रोत",
-                "link": ""
+                "title": title,
+                "source": "News",
+                "published": "",
+                "url": ""
             }
 
-        elif current:
+            articles.append(current)
+            continue
 
-            url_match = re.search(
-                r"https?://\S+",
-                line
-            )
+        if current is None:
+            continue
 
-            if url_match and not current["link"]:
-                current["link"] = (
-                    url_match.group(0).rstrip(")>,")
-                )
+        # Source
+        if line.lower().startswith("- source"):
+            current["source"] = re.sub(
+                r"^- source(?: feed)?\s*:\s*",
+                "",
+                line,
+                flags=re.I
+            ).strip()
 
-            if line.lower().startswith("source:"):
-                current["source"] = (
-                    line.split(":", 1)[1].strip()
-                )
+        # Published date
+        elif line.lower().startswith("- published"):
+            current["published"] = re.sub(
+                r"^- published\s*:\s*",
+                "",
+                line,
+                flags=re.I
+            ).strip()
 
-    if current:
-        articles.append(current)
+        # News URL
+        elif line.lower().startswith("- link"):
+            current["url"] = re.sub(
+                r"^- link\s*:\s*",
+                "",
+                line,
+                flags=re.I
+            ).strip()
 
-    unique = []
-    seen = set()
+    articles = [
+        a for a in articles
+        if a["title"] and a["url"].startswith("http")
+    ]
 
-    for article in articles:
+    print(f"Found {len(articles)} news articles.")
 
-        title = article["title"].strip()
-        key = title.lower()
-
-        if title and key not in seen:
-            seen.add(key)
-            article["title"] = title
-            unique.append(article)
-
-    print("News articles found:", len(unique))
-
-    return unique[:MAX_CARDS]
+    return articles[:MAX_CARDS]
 
 
-# ---------------- PHOTO DOWNLOAD ----------------
+# ============== DOWNLOAD NEWS IMAGE ==============
 
-def get_article_photo(article):
-
-    url = article.get("link", "")
-
-    if not url:
-        print("No article link available.")
-        return create_placeholder()
+def get_news_image(url):
 
     try:
 
         response = requests.get(
             url,
             headers=HEADERS,
-            timeout=25,
-            allow_redirects=True
+            timeout=20
         )
 
         response.raise_for_status()
@@ -217,178 +231,87 @@ def get_article_photo(article):
 
         image_url = None
 
-        # Search common image metadata
-        for property_name in [
-            "og:image",
-            "og:image:url",
-            "twitter:image",
-            "twitter:image:src"
+        for attr in [
+            {"property": "og:image"},
+            {"name": "twitter:image"},
+            {"property": "og:image:url"}
         ]:
 
-            tag = soup.find(
-                "meta",
-                attrs={"property": property_name}
-            )
-
-            if not tag:
-                tag = soup.find(
-                    "meta",
-                    attrs={"name": property_name}
-                )
+            tag = soup.find("meta", attrs=attr)
 
             if tag and tag.get("content"):
-                image_url = tag["content"].strip()
+                image_url = tag["content"]
                 break
 
-        # Try JSON-LD image if metadata is missing
         if not image_url:
+            return None
 
-            for script in soup.find_all(
-                "script",
-                type="application/ld+json"
-            ):
+        image_url = urljoin(url, image_url)
 
-                try:
-                    import json
-
-                    data = json.loads(script.string or script.get_text())
-
-                    if isinstance(data, list):
-                        data = data[0]
-
-                    if isinstance(data, dict):
-                        image = data.get("image")
-
-                        if isinstance(image, str):
-                            image_url = image
-
-                        elif isinstance(image, list) and image:
-                            image_url = image[0]
-
-                        elif isinstance(image, dict):
-                            image_url = image.get("url")
-
-                    if image_url:
-                        break
-
-                except Exception:
-                    continue
-
-        if not image_url:
-            print("Article has no image metadata.")
-            return create_placeholder()
-
-        image_url = urljoin(
-            response.url,
-            image_url
-        )
-
-        photo_response = requests.get(
+        image_response = requests.get(
             image_url,
             headers=HEADERS,
-            timeout=25
+            timeout=20
         )
 
-        photo_response.raise_for_status()
+        image_response.raise_for_status()
 
-        photo = Image.open(
-            BytesIO(photo_response.content)
-        )
+        if len(image_response.content) > 12 * 1024 * 1024:
+            return None
 
-        photo = ImageOps.exif_transpose(
-            photo
+        image = Image.open(
+            BytesIO(image_response.content)
         ).convert("RGB")
 
-        if photo.width < 200 or photo.height < 150:
-            raise ValueError("Image is too small.")
+        if image.width < 300 or image.height < 200:
+            return None
 
-        print("Real news photo downloaded:", image_url)
-
-        return photo
+        return image
 
     except Exception as error:
 
-        print(
-            "Photo unavailable:",
-            str(error)[:180]
-        )
+        print("Image download failed:", error)
 
-        return create_placeholder()
+        return None
 
 
-# ---------------- PLACEHOLDER ----------------
+# ============== IMAGE DESIGN ==============
 
-def create_placeholder():
+def make_background():
 
-    placeholder = Image.new(
+    image = Image.new(
         "RGB",
-        (WIDTH, 570),
-        "#263746"
+        (WIDTH, HEIGHT),
+        BG
     )
 
-    draw = ImageDraw.Draw(placeholder)
+    draw = ImageDraw.Draw(image)
 
     draw.rectangle(
-        (100, 70, 980, 500),
-        outline="#526879",
-        width=8
+        (0, 0, WIDTH, 15),
+        fill=RED
     )
 
-    draw.ellipse(
-        (750, 140, 850, 240),
-        fill="#526879"
+    draw.rectangle(
+        (0, 15, WIDTH, 23),
+        fill=YELLOW
     )
 
-    draw.line(
-        (160, 440, 400, 250, 600, 390,
-         760, 280, 920, 440),
-        fill="#526879",
-        width=12
-    )
-
-    text = "तस्बिर उपलब्ध छैन"
-    font = load_font(42, True)
-
-    box = draw.textbbox((0, 0), text, font=font)
-    text_width = box[2] - box[0]
-
-    draw.text(
-        ((WIDTH - text_width) // 2, 510),
-        text,
-        font=font,
-        fill=WHITE
-    )
-
-    return placeholder
+    return image
 
 
-# ---------------- IMAGE FIT ----------------
+# ============== TEXT WRAPPING ==============
 
-def crop_photo(photo, target_width, target_height):
-
-    return ImageOps.fit(
-        photo.convert("RGB"),
-        (target_width, target_height),
-        method=Image.Resampling.LANCZOS,
-        centering=(0.5, 0.5)
-    )
-
-
-# ---------------- TEXT WRAPPING ----------------
-
-def wrap_text(draw, text, font, max_width):
+def wrap_text(text, font, max_width, draw):
 
     words = text.split()
 
     lines = []
-    current = ""
+    line = ""
 
     for word in words:
 
-        test = (
-            current + " " + word
-            if current else word
-        )
+        test = word if not line else line + " " + word
 
         box = draw.textbbox(
             (0, 0),
@@ -397,236 +320,235 @@ def wrap_text(draw, text, font, max_width):
         )
 
         if box[2] - box[0] <= max_width:
-            current = test
+            line = test
 
         else:
 
-            if current:
-                lines.append(current)
+            if line:
+                lines.append(line)
 
-            current = word
+            line = word
 
-    if current:
-        lines.append(current)
+    if line:
+        lines.append(line)
 
     return lines
 
 
-# ---------------- HEADLINE FIT ----------------
+def draw_headline(draw, title):
 
-def get_headline_layout(draw, headline):
+    font_size = 65
 
-    for size in [62, 56, 50, 46, 42, 38]:
+    while font_size >= 40:
 
-        font = load_font(size, True)
+        font = load_font(font_size, bold=True)
 
         lines = wrap_text(
-            draw,
-            headline,
+            title,
             font,
-            920
+            940,
+            draw
         )
 
+        line_height = font_size + 23
+
         if len(lines) <= 5:
-            return font, lines, size + 28
+            if len(lines) * line_height <= 400:
+                break
 
-    font = load_font(38, True)
+        font_size -= 3
 
-    lines = wrap_text(
-        draw,
-        headline,
-        font,
-        920
-    )
+    y = 785
 
-    return font, lines[:5], 66
-
-
-# ---------------- NEWS CARD ----------------
-
-def create_news_card(article, index):
-
-    canvas = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        BACKGROUND
-    )
-
-    draw = ImageDraw.Draw(canvas)
-
-    # Header
-    draw.rectangle(
-        (0, 0, WIDTH, 105),
-        fill=RED
-    )
-
-    draw.text(
-        (45, 20),
-        "नेपाली समाचार",
-        font=load_font(46, True),
-        fill=WHITE
-    )
-
-    draw.text(
-        (790, 35),
-        "NEWS UPDATE",
-        font=load_font(30, True),
-        fill=WHITE
-    )
-
-    # News label
-    draw.rounded_rectangle(
-        (45, 125, 345, 190),
-        radius=12,
-        fill=YELLOW
-    )
-
-    draw.text(
-        (65, 135),
-        "ताजा समाचार",
-        font=load_font(34, True),
-        fill=BACKGROUND
-    )
-
-    # Main photo
-    photo = get_article_photo(article)
-
-    photo = crop_photo(
-        photo,
-        WIDTH,
-        570
-    )
-
-    canvas.paste(
-        photo,
-        (0, 205)
-    )
-
-    # Headline background
-    draw.rectangle(
-        (0, 775, WIDTH, 1235),
-        fill=BACKGROUND
-    )
-
-    draw.rectangle(
-        (45, 810, 60, 940),
-        fill=YELLOW
-    )
-
-    headline = article.get(
-        "title",
-        "आजका मुख्य समाचार"
-    )
-
-    headline_font, lines, line_height = (
-        get_headline_layout(draw, headline)
-    )
-
-    y = 805
-
-    for line in lines:
+    for line in lines[:5]:
 
         draw.text(
-            (90, y),
+            (70, y),
             line,
-            font=headline_font,
-            fill=WHITE
+            font=font,
+            fill=WHITE,
+            stroke_width=1,
+            stroke_fill=BG
         )
 
         y += line_height
 
-    # Footer
-    draw.rectangle(
-        (0, 1235, WIDTH, HEIGHT),
-        fill="#07111E"
-    )
+    return y
 
-    source = article.get(
-        "source",
-        "समाचार स्रोत"
-    )
 
-    source_font = load_font(27, True)
-    date_font = load_font(29, True)
+# ============== CREATE NEWS CARD ==============
+
+def create_card(article, number):
+
+    image = make_background()
+
+    draw = ImageDraw.Draw(image)
+
+    # Top header
+    header_font = load_font(42, bold=True)
+    small_font = load_font(26)
+    date_font = load_font(27, bold=True)
+
+    draw.rounded_rectangle(
+        (55, 55, 360, 125),
+        radius=15,
+        fill=RED
+    )
 
     draw.text(
-        (45, 1255),
-        "स्रोत: " + source[:30],
-        font=source_font,
+        (78, 66),
+        "BREAKING NEWS",
+        font=load_font(29, bold=True),
+        fill=WHITE
+    )
+
+    draw.text(
+        (690, 76),
+        "नेपाल | विश्व",
+        font=header_font,
+        fill=WHITE
+    )
+
+    # News photo
+    news_image = get_news_image(article["url"])
+
+    photo_box = (55, 165, 1025, 740)
+
+    if news_image:
+
+        photo = ImageOps.fit(
+            news_image,
+            (970, 575),
+            method=Image.Resampling.LANCZOS
+        )
+
+        image.paste(photo, (55, 165))
+
+    else:
+
+        draw.rounded_rectangle(
+            photo_box,
+            radius=20,
+            fill=PANEL
+        )
+
+        draw.text(
+            (300, 390),
+            "NEPALI WORLD NEWS",
+            font=load_font(48, bold=True),
+            fill=YELLOW
+        )
+
+    # Photo border
+    draw.rounded_rectangle(
+        photo_box,
+        radius=20,
+        outline=YELLOW,
+        width=4
+    )
+
+    # Headline background
+    draw.rectangle(
+        (0, 755, WIDTH, 1240),
+        fill=BG
+    )
+
+    draw.rectangle(
+        (55, 770, 65, 1200),
+        fill=YELLOW
+    )
+
+    # Headline
+    end_y = draw_headline(
+        draw,
+        article["title"]
+    )
+
+    # Source
+    source = article["source"][:65]
+
+    draw.line(
+        (55, 1235, 1025, 1235),
+        fill="#52647A",
+        width=2
+    )
+
+    draw.text(
+        (65, 1260),
+        f"स्रोत: {source}",
+        font=small_font,
         fill=MUTED
     )
 
-    date_text = get_nepali_date()
+    # Nepali date
+    nepali_date = get_nepali_date()
 
-    date_width = draw.textbbox(
-        (0, 0),
-        date_text,
-        font=date_font
-    )[2]
+    date_text = f"मिति: {nepali_date}"
 
     draw.text(
-        (WIDTH - date_width - 45, 1300),
+        (65, 1300),
         date_text,
         font=date_font,
         fill=YELLOW
     )
 
-    # Save
-    output_path = os.path.join(
-        OUTPUT_DIR,
-        f"news_card_{index:02d}.png"
+    # Card number
+    draw.text(
+        (890, 1305),
+        f"NEWS {number:02d}",
+        font=small_font,
+        fill=WHITE
     )
 
-    canvas.save(
-        output_path,
-        "PNG",
+    output_file = (
+        Path(OUTPUT_DIR)
+        / f"news_card_{number:02d}.png"
+    )
+
+    image.save(
+        output_file,
+        format="PNG",
         optimize=True
     )
 
-    print("Saved:", output_path)
+    print("Created:", output_file)
 
 
-# ---------------- MAIN ----------------
+# ============== MAIN ==============
 
 def main():
 
     print("Starting Nepali News Card Generator...")
 
+    # Remove previous generated cards
+    for old_file in Path(OUTPUT_DIR).glob("news_card_*.png"):
+        old_file.unlink()
+
     articles = read_news()
 
     if not articles:
-        print("No news articles found.")
+        print("No valid news articles found.")
         return
 
-    print("Nepali date:", get_nepali_date())
-
-    success = 0
-
-    for index, article in enumerate(
-        articles,
-        start=1
-    ):
+    for index, article in enumerate(articles, start=1):
 
         try:
 
-            create_news_card(
-                article,
-                index
+            print(
+                f"Creating card {index}: "
+                f"{article['title']}"
             )
 
-            success += 1
+            create_card(article, index)
 
         except Exception as error:
 
             print(
                 f"Card {index} failed:",
-                str(error)[:200]
+                error
             )
 
-    print("==============================")
-    print("News cards created:", success)
-    print("Output folder:", OUTPUT_DIR)
-    print("==============================")
+    print("News card generation completed.")
 
 
 if __name__ == "__main__":
