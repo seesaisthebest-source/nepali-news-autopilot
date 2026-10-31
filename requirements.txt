@@ -1,6 +1,4 @@
-
-Pillow
-feedparser
 requests
 beautifulsoup4
+Pillow
 nepali-datetime
