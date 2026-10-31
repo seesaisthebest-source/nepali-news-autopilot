@@ -9,9 +9,29 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from PIL import Image, ImageDraw, ImageFont
+from nepali_datetime import datetime as NepaliDateTime
+
 OUTPUT_FILE = "news_candidates.md"
+CARD_DIR = Path("news_cards")
+FONT_DIR = Path("fonts")
+
 MAX_NEWS = 20
 WINDOW_HOURS = 24
+
+CARD_WIDTH = 1080
+CARD_HEIGHT = 1350
+
+FONT_DIR.mkdir(exist_ok=True)
+CARD_DIR.mkdir(exist_ok=True)
+
+FONT_PATH = FONT_DIR / "NotoSansDevanagari-Bold.ttf"
+
+FONT_URL = (
+    "https://github.com/google/fonts/raw/main/"
+    "ofl/notosansdevanagari/"
+    "NotoSansDevanagari%5Bwght%5D.ttf"
+)
 
 FEEDS = [
     {
@@ -44,6 +64,48 @@ def clean_text(text):
     return text.strip()
 
 
+def download_font():
+    if FONT_PATH.exists():
+        return
+
+    print("Downloading Nepali font...")
+
+    try:
+        response = requests.get(
+            FONT_URL,
+            headers=HEADERS,
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        FONT_PATH.write_bytes(response.content)
+
+        print("Nepali font downloaded.")
+
+    except Exception as error:
+        print("Font download error:", error)
+
+
+def get_font(size):
+    if FONT_PATH.exists():
+        return ImageFont.truetype(
+            str(FONT_PATH),
+            size=size,
+        )
+
+    return ImageFont.load_default()
+
+
+def get_nepali_date():
+    today = NepaliDateTime.now()
+
+    return (
+        f"{today.year} साल "
+        f"{today.month} महिना "
+        f"{today.day} गते"
+    )
+
+
 def get_news():
     cutoff = datetime.now(timezone.utc) - timedelta(
         hours=WINDOW_HOURS
@@ -61,6 +123,7 @@ def get_news():
                 headers=HEADERS,
                 timeout=20,
             )
+
             response.raise_for_status()
 
             root = ET.fromstring(response.content)
@@ -127,6 +190,139 @@ def get_news():
     return articles[:MAX_NEWS]
 
 
+def create_news_card(article, index):
+    width = CARD_WIDTH
+    height = CARD_HEIGHT
+
+    image = Image.new(
+        "RGB",
+        (width, height),
+        (12, 20, 38),
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    # Background
+    draw.rectangle(
+        (0, 0, width, 18),
+        fill=(220, 35, 45),
+    )
+
+    # Header
+    draw.text(
+        (55, 55),
+        "नेपाल समाचार",
+        font=get_font(48),
+        fill=(255, 255, 255),
+    )
+
+    draw.text(
+        (55, 125),
+        "NEPALI NEWS",
+        font=get_font(30),
+        fill=(180, 195, 215),
+    )
+
+    # Breaking news label
+    draw.rounded_rectangle(
+        (55, 205, 350, 275),
+        radius=15,
+        fill=(220, 35, 45),
+    )
+
+    draw.text(
+        (80, 215),
+        "ताजा समाचार",
+        font=get_font(36),
+        fill=(255, 255, 255),
+    )
+
+    # Headline
+    headline = article["title"]
+
+    font = get_font(58)
+
+    words = headline.split()
+    lines = []
+    current_line = ""
+
+    for word in words:
+        test_line = (
+            current_line + " " + word
+        ).strip()
+
+        if draw.textlength(
+            test_line,
+            font=font,
+        ) > width - 110:
+
+            if current_line:
+                lines.append(current_line)
+
+            current_line = word
+
+        else:
+            current_line = test_line
+
+    if current_line:
+        lines.append(current_line)
+
+    y = 340
+
+    for line in lines[:8]:
+        draw.text(
+            (55, y),
+            line,
+            font=font,
+            fill=(255, 255, 255),
+        )
+
+        y += 85
+
+    # News source
+    source = article["source"]
+
+    draw.text(
+        (55, 1050),
+        "स्रोत: " + source,
+        font=get_font(32),
+        fill=(180, 195, 215),
+    )
+
+    # Nepali date
+    nepali_date = get_nepali_date()
+
+    draw.text(
+        (55, 1120),
+        nepali_date,
+        font=get_font(34),
+        fill=(255, 210, 70),
+    )
+
+    # Footer
+    draw.rectangle(
+        (0, 1240, width, height),
+        fill=(220, 35, 45),
+    )
+
+    draw.text(
+        (55, 1275),
+        "NEPALI NEWS AUTOPILOT",
+        font=get_font(30),
+        fill=(255, 255, 255),
+    )
+
+    output_path = CARD_DIR / (
+        f"news_card_{index}.png"
+    )
+
+    image.save(output_path)
+
+    print("News card saved:", output_path)
+
+    return output_path
+
+
 def save_news(articles):
     now = datetime.now(timezone.utc).strftime(
         "%Y-%m-%d %H:%M UTC"
@@ -142,7 +338,10 @@ def save_news(articles):
         "",
     ]
 
-    for article in articles:
+    for index, article in enumerate(
+        articles,
+        start=1,
+    ):
         lines.extend([
             "## " + article["title"],
             "",
@@ -155,6 +354,18 @@ def save_news(articles):
             "Link: " + article["link"],
             "",
         ])
+
+        try:
+            create_news_card(
+                article,
+                index,
+            )
+
+        except Exception as error:
+            print(
+                "Card error:",
+                str(error)[:200],
+            )
 
     Path(OUTPUT_FILE).write_text(
         "\n".join(lines),
@@ -172,6 +383,8 @@ def save_news(articles):
 
 def main():
     print("Starting Nepali News Collector...")
+
+    download_font()
 
     articles = get_news()
 
