@@ -8,17 +8,13 @@ from zoneinfo import ZoneInfo
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
-from PIL import (
-    Image,
-    ImageDraw,
-    ImageFont,
-    ImageOps,
-    features,
-)
+from PIL import Image, ImageDraw, ImageFont, ImageOps, features
 from nepali_datetime import date as NepaliDate
 
 
 # ============== SETTINGS ==============
+
+VERSION = "NEWS CARD VERSION 2.0"
 
 INPUT_FILE = "news_candidates.json"
 OUTPUT_DIR = Path("news_cards")
@@ -51,37 +47,36 @@ def download_font():
 
     global FONT_PATH
 
-    possible_fonts = [
-        Path(
-            "/usr/share/fonts/truetype/noto/"
-            "NotoSansDevanagari-Regular.ttf"
-        ),
-        Path(
-            "/usr/share/fonts/truetype/noto/"
-            "NotoSansDevanagariUI-Regular.ttf"
-        ),
-        Path(
-            "/usr/share/fonts/truetype/noto/"
-            "NotoSansDevanagari.ttf"
-        ),
+    print("Searching installed Nepali fonts...")
+
+    font_directories = [
+        Path("/usr/share/fonts"),
+        Path("/usr/local/share/fonts"),
+        Path("fonts"),
     ]
 
-    # Also search installed Noto font directories
-    noto_dir = Path("/usr/share/fonts")
+    possible_fonts = []
 
-    if noto_dir.exists():
-        possible_fonts.extend(
-            noto_dir.rglob("*Devanagari*.ttf")
-        )
+    for directory in font_directories:
+
+        if directory.exists():
+
+            possible_fonts.extend(
+                directory.rglob("*Devanagari*.ttf")
+            )
+
+            possible_fonts.extend(
+                directory.rglob("*Devanagari*.otf")
+            )
+
+    # Remove duplicate paths
+    possible_fonts = list(dict.fromkeys(possible_fonts))
 
     for path in possible_fonts:
 
-        if not path.exists():
-            continue
-
         try:
 
-            ImageFont.truetype(
+            test_font = ImageFont.truetype(
                 str(path),
                 30,
                 layout_engine=ImageFont.Layout.RAQM,
@@ -89,17 +84,17 @@ def download_font():
 
             FONT_PATH = path
 
-            print("Nepali font loaded:", path)
+            print("NEPALI FONT LOADED:", FONT_PATH)
 
             return
 
         except Exception as error:
 
-            print("Font loading error:", str(error)[:150])
+            print("Skipping font:", path, str(error)[:100])
 
     raise RuntimeError(
         "Nepali font not found. "
-        "Install fonts-noto-core in GitHub Actions."
+        "Install fonts-noto-core before running this script."
     )
 
 
@@ -108,8 +103,7 @@ def check_raqm():
     if not features.check_feature("raqm"):
 
         raise RuntimeError(
-            "Pillow RAQM is unavailable. "
-            "Install a Pillow build with libraqm support."
+            "Pillow RAQM is unavailable."
         )
 
     print("RAQM support: ENABLED")
@@ -118,7 +112,8 @@ def check_raqm():
 def font(size):
 
     if FONT_PATH is None:
-        raise RuntimeError("Nepali font has not been loaded.")
+
+        raise RuntimeError("Nepali font is not loaded.")
 
     return ImageFont.truetype(
         str(FONT_PATH),
@@ -216,8 +211,6 @@ def download_image(url):
 
     try:
 
-        print("Trying image URL:", str(url)[:120])
-
         response = requests.get(
             url,
             headers=HEADERS,
@@ -233,7 +226,7 @@ def download_image(url):
 
         if not content_type.startswith("image/"):
 
-            print("URL did not return an image.")
+            print("Not an image URL:", url[:100])
 
             return None
 
@@ -269,16 +262,18 @@ def download_image(url):
 
 def get_news_photo(article_url, saved_image_url=""):
 
-    # First try the image URL already found in news.py
+    # First try the saved RSS image URL
 
     if saved_image_url:
+
+        print("Trying RSS image URL...")
 
         photo = download_image(saved_image_url)
 
         if photo:
             return photo
 
-    # If direct image download fails, inspect article page
+    # Then inspect the article webpage
 
     if not article_url:
 
@@ -288,10 +283,7 @@ def get_news_photo(article_url, saved_image_url=""):
 
     try:
 
-        print(
-            "Checking article for photo:",
-            str(article_url)[:120],
-        )
+        print("Checking article webpage for image...")
 
         response = requests.get(
             article_url,
@@ -330,8 +322,6 @@ def get_news_photo(article_url, saved_image_url=""):
 
                 break
 
-        # Fallback to image_src
-
         if not image_url:
 
             tag = soup.find(
@@ -345,7 +335,7 @@ def get_news_photo(article_url, saved_image_url=""):
 
         if not image_url:
 
-            print("No article photo found.")
+            print("No article image found.")
 
             return None
 
@@ -354,10 +344,7 @@ def get_news_photo(article_url, saved_image_url=""):
             image_url,
         )
 
-        print(
-            "Found article photo:",
-            image_url[:120],
-        )
+        print("Article image found.")
 
         return download_image(image_url)
 
@@ -638,6 +625,8 @@ def create_card(item, number):
 # ============== MAIN ==============
 
 def main():
+
+    print(VERSION)
 
     print("Starting News Card Generator...")
 
