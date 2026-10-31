@@ -1,6 +1,8 @@
 
 import re
+import json
 import time
+import html
 import requests
 import xml.etree.ElementTree as ET
 
@@ -9,34 +11,23 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from PIL import Image, ImageDraw, ImageFont
-from nepali_datetime import datetime as NepaliDateTime
-
-OUTPUT_FILE = "news_candidates.md"
-CARD_DIR = Path("news_cards")
-FONT_DIR = Path("fonts")
+OUTPUT_JSON = "news_candidates.json"
+OUTPUT_MD = "news_candidates.md"
 
 MAX_NEWS = 20
 WINDOW_HOURS = 24
 
-CARD_WIDTH = 1080
-CARD_HEIGHT = 1350
-
-FONT_DIR.mkdir(exist_ok=True)
-CARD_DIR.mkdir(exist_ok=True)
-
-FONT_PATH = FONT_DIR / "NotoSansDevanagari-Bold.ttf"
-
-FONT_URL = (
-    "https://github.com/google/fonts/raw/main/"
-    "ofl/notosansdevanagari/"
-    "NotoSansDevanagari%5Bwght%5D.ttf"
-)
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Linux; Android 15) "
+        "AppleWebKit/537.36 Chrome/130.0.0.0 "
+        "Mobile Safari/537.36"
+    )
+}
 
 FEEDS = [
     {
         "name": "नेपाल समाचार",
-        "query": "Nepal",
         "url": (
             "https://news.google.com/rss/search?q="
             + quote("Nepal")
@@ -45,7 +36,6 @@ FEEDS = [
     },
     {
         "name": "विश्व समाचार",
-        "query": "World",
         "url": (
             "https://news.google.com/rss/search?q="
             + quote("World news")
@@ -54,74 +44,71 @@ FEEDS = [
     },
 ]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 NepaliNewsAutopilot/1.0"
-}
+
+def clean_text(value):
+    value = html.unescape(value or "")
+    value = re.sub(r"<[^>]+>", "", value)
+    return re.sub(r"\s+", " ", value).strip()
 
 
-def clean_text(text):
-    text = re.sub(r"<[^>]+>", "", text or "")
-    return text.strip()
-
-
-def download_font():
-    if FONT_PATH.exists():
-        return
-
-    print("Downloading Nepali font...")
+def resolve_article_url(url):
+    """Resolve Google News RSS URL to its destination."""
 
     try:
         response = requests.get(
-            FONT_URL,
+            url,
             headers=HEADERS,
-            timeout=30,
-        )
-        response.raise_for_status()
-
-        FONT_PATH.write_bytes(response.content)
-
-        print("Nepali font downloaded.")
-
-    except Exception as error:
-        print("Font download error:", error)
-
-
-def get_font(size):
-    if FONT_PATH.exists():
-        return ImageFont.truetype(
-            str(FONT_PATH),
-            size=size,
+            timeout=20,
+            allow_redirects=True,
+            stream=True,
         )
 
-    return ImageFont.load_default()
+        final_url = response.url
+        response.close()
+
+        if final_url and "news.google.com" not in final_url:
+            return final_url
+
+    except requests.RequestException as error:
+        print("URL resolution error:", str(error)[:150])
+
+    return url
 
 
-def get_nepali_date():
-    today = NepaliDateTime.now()
+def parse_date(value):
+    try:
+        published = parsedate_to_datetime(value)
 
-    return (
-        f"{today.year} साल "
-        f"{today.month} महिना "
-        f"{today.day} गते"
-    )
+        if published.tzinfo is None:
+            published = published.replace(
+                tzinfo=timezone.utc
+            )
+
+        return published.astimezone(timezone.utc)
+
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 def get_news():
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        hours=WINDOW_HOURS
+
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(hours=WINDOW_HOURS)
     )
 
     articles = []
     seen = set()
 
     for feed in FEEDS:
-        print("Reading feed:", feed["name"])
+
+        print("Reading:", feed["name"])
 
         try:
             response = requests.get(
                 feed["url"],
                 headers=HEADERS,
-                timeout=20,
+                timeout=25,
             )
 
             response.raise_for_status()
@@ -129,51 +116,65 @@ def get_news():
             root = ET.fromstring(response.content)
 
             for item in root.findall(".//item"):
+
                 title = clean_text(
                     item.findtext("title", "")
                 )
 
-                link = item.findtext("link", "")
-                pub_date = item.findtext("pubDate", "")
+                rss_url = (
+                    item.findtext("link", "") or ""
+                ).strip()
 
-                if not title or not link or not pub_date:
+                pub_date = item.findtext(
+                    "pubDate", ""
+                )
+
+                if not title or not rss_url:
                     continue
 
-                try:
-                    published = parsedate_to_datetime(
-                        pub_date
-                    )
+                published = parse_date(pub_date)
 
-                    if published.tzinfo is None:
-                        published = published.replace(
-                            tzinfo=timezone.utc
-                        )
-
-                    published = published.astimezone(
-                        timezone.utc
-                    )
-
-                except Exception:
+                if not published:
                     continue
 
                 if published < cutoff:
                     continue
 
-                key = title.lower()
+                key = title.casefold()
 
                 if key in seen:
                     continue
 
                 seen.add(key)
 
+                # Find publisher name from RSS
+                source_element = item.find("source")
+
+                source = (
+                    clean_text(source_element.text)
+                    if source_element is not None
+                    else feed["name"]
+                )
+
+                print("Resolving:", title[:70])
+
+                article_url = resolve_article_url(
+                    rss_url
+                )
+
                 articles.append({
                     "title": title,
-                    "link": link,
-                    "source": feed["name"],
-                    "published": published,
+                    "rss_url": rss_url,
+                    "article_url": article_url,
+                    "source": source,
+                    "published": published.isoformat(),
+                    "image_url": None,
                 })
 
+                time.sleep(0.5)
+
         except Exception as error:
+
             print(
                 "Feed error:",
                 feed["name"],
@@ -183,158 +184,30 @@ def get_news():
         time.sleep(1)
 
     articles.sort(
-        key=lambda article: article["published"],
+        key=lambda item: item["published"],
         reverse=True,
     )
 
     return articles[:MAX_NEWS]
 
 
-def create_news_card(article, index):
-    width = CARD_WIDTH
-    height = CARD_HEIGHT
-
-    image = Image.new(
-        "RGB",
-        (width, height),
-        (12, 20, 38),
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    # Background
-    draw.rectangle(
-        (0, 0, width, 18),
-        fill=(220, 35, 45),
-    )
-
-    # Header
-    draw.text(
-        (55, 55),
-        "नेपाल समाचार",
-        font=get_font(48),
-        fill=(255, 255, 255),
-    )
-
-    draw.text(
-        (55, 125),
-        "NEPALI NEWS",
-        font=get_font(30),
-        fill=(180, 195, 215),
-    )
-
-    # Breaking news label
-    draw.rounded_rectangle(
-        (55, 205, 350, 275),
-        radius=15,
-        fill=(220, 35, 45),
-    )
-
-    draw.text(
-        (80, 215),
-        "ताजा समाचार",
-        font=get_font(36),
-        fill=(255, 255, 255),
-    )
-
-    # Headline
-    headline = article["title"]
-
-    font = get_font(58)
-
-    words = headline.split()
-    lines = []
-    current_line = ""
-
-    for word in words:
-        test_line = (
-            current_line + " " + word
-        ).strip()
-
-        if draw.textlength(
-            test_line,
-            font=font,
-        ) > width - 110:
-
-            if current_line:
-                lines.append(current_line)
-
-            current_line = word
-
-        else:
-            current_line = test_line
-
-    if current_line:
-        lines.append(current_line)
-
-    y = 340
-
-    for line in lines[:8]:
-        draw.text(
-            (55, y),
-            line,
-            font=font,
-            fill=(255, 255, 255),
-        )
-
-        y += 85
-
-    # News source
-    source = article["source"]
-
-    draw.text(
-        (55, 1050),
-        "स्रोत: " + source,
-        font=get_font(32),
-        fill=(180, 195, 215),
-    )
-
-    # Nepali date
-    nepali_date = get_nepali_date()
-
-    draw.text(
-        (55, 1120),
-        nepali_date,
-        font=get_font(34),
-        fill=(255, 210, 70),
-    )
-
-    # Footer
-    draw.rectangle(
-        (0, 1240, width, height),
-        fill=(220, 35, 45),
-    )
-
-    draw.text(
-        (55, 1275),
-        "NEPALI NEWS AUTOPILOT",
-        font=get_font(30),
-        fill=(255, 255, 255),
-    )
-
-    output_path = CARD_DIR / (
-        f"news_card_{index}.png"
-    )
-
-    image.save(output_path)
-
-    print("News card saved:", output_path)
-
-    return output_path
-
-
 def save_news(articles):
-    now = datetime.now(timezone.utc).strftime(
-        "%Y-%m-%d %H:%M UTC"
+
+    Path(OUTPUT_JSON).write_text(
+        json.dumps(
+            articles,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
 
     lines = [
-        "# Nepali + World News Candidates",
+        "# Nepali and World News",
         "",
-        f"Collected: {now}",
-        "",
-        "> RSS headlines are candidates, not verified facts. "
-        "Check original sources before publishing.",
+        "Collected: " + datetime.now(
+            timezone.utc
+        ).isoformat(),
         "",
     ]
 
@@ -342,55 +215,40 @@ def save_news(articles):
         articles,
         start=1,
     ):
+
         lines.extend([
-            "## " + article["title"],
+            f"## {index}. {article['title']}",
             "",
             "Source: " + article["source"],
             "",
-            "Published: " + article["published"].strftime(
-                "%Y-%m-%d %H:%M UTC"
-            ),
+            "Article URL: " + article["article_url"],
             "",
-            "Link: " + article["link"],
+            "Published: " + article["published"],
+            "",
+            "---",
             "",
         ])
 
-        try:
-            create_news_card(
-                article,
-                index,
-            )
-
-        except Exception as error:
-            print(
-                "Card error:",
-                str(error)[:200],
-            )
-
-    Path(OUTPUT_FILE).write_text(
+    Path(OUTPUT_MD).write_text(
         "\n".join(lines),
         encoding="utf-8",
     )
 
-    print(
-        "Collected",
-        len(articles),
-        "news candidates.",
-    )
-
-    print("Saved:", OUTPUT_FILE)
+    print()
+    print("Total news:", len(articles))
+    print("Saved:", OUTPUT_JSON)
+    print("Saved:", OUTPUT_MD)
 
 
 def main():
-    print("Starting Nepali News Collector...")
 
-    download_font()
+    print("Starting Nepali News Collector...")
 
     articles = get_news()
 
     save_news(articles)
 
-    print("News collection finished.")
+    print("News collection completed.")
 
 
 if __name__ == "__main__":
