@@ -49,13 +49,26 @@ jobs:
       - name: Collect news
         run: python news.py
 
+      - name: Show collected news
+        run: |
+          echo "News candidates file:"
+          ls -l news_candidates.md
+          cat news_candidates.md
+
       - name: Generate news cards
         run: python news_card.py
 
-      - name: List generated cards
+      - name: Debug generated files
+        if: always()
         run: |
-          echo "Generated PNG files:"
-          find news_cards -maxdepth 1 -type f -name "*.png" -print
+          echo "Current directory:"
+          pwd
+          echo "Files:"
+          ls -la
+          echo "News candidates:"
+          cat news_candidates.md || true
+          echo "Generated cards:"
+          find news_cards -maxdepth 1 -type f -name "*.png" -print || true
 
       - name: Save generated cards
         uses: actions/upload-artifact@v4
